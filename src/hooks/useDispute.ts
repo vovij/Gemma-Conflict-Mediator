@@ -1,57 +1,56 @@
-import { useState, useEffect } from 'react';
-import { Message, Dispute } from '../types';
-import { api } from '../services/api';
+// src/hooks/useDispute.ts
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { DisputeWebSocket } from '../services/socket';
 
 export const useDispute = (disputeId: string, participantName: string) => {
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [dispute, setDispute] = useState<Dispute | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
   const [socket, setSocket] = useState<DisputeWebSocket | null>(null);
 
-  useEffect(() => {
-    const loadData = async () => {
-      try {
-        setLoading(true);
-        const [messagesData, disputeData] = await Promise.all([
-          api.getMessages(disputeId),
-          api.getDisputeStatus(disputeId)
-        ]);
-        
-        setMessages(messagesData);
-        setDispute(disputeData);
-        
-        // Initialize WebSocket
-        const ws = new DisputeWebSocket(disputeId, participantName).connect();
-        ws.onMessage((message) => {
-          setMessages(prev => [...prev, message]);
-        });
-        setSocket(ws);
-        
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'An error occurred');
-      } finally {
-        setLoading(false);
-      }
-    };
+  // Query for messages
+  const { data: messages, isLoading: messagesLoading } = useQuery({
+    queryKey: ['messages', disputeId],
+    queryFn: () => api.getMessages(disputeId),
+    refetchInterval: false // We'll use WebSocket for real-time updates
+  });
 
-    loadData();
+  // Query for dispute status
+  const { data: dispute, isLoading: disputeLoading } = useQuery({
+    queryKey: ['dispute', disputeId],
+    queryFn: () => api.getDisputeStatus(disputeId)
+  });
+
+  // Mutation for sending messages
+  const { mutate: sendMessage } = useMutation({
+    mutationFn: (content: string) => {
+      socket?.sendMessage(content);
+      return Promise.resolve(); // WebSocket handles the actual sending
+    },
+    onSuccess: () => {
+      // Optionally handle successful message send
+    }
+  });
+
+  useEffect(() => {
+    const ws = new DisputeWebSocket(disputeId, participantName).connect();
+    
+    ws.onMessage((message) => {
+      // Update the messages cache when new message arrives
+      queryClient.setQueryData(['messages', disputeId], (old: any) => 
+        old ? [...old, message] : [message]
+      );
+    });
+    
+    setSocket(ws);
 
     return () => {
-      socket?.disconnect();
+      ws.disconnect();
     };
-  }, [disputeId, participantName]);
-
-  const sendMessage = (content: string) => {
-    socket?.sendMessage(content);
-  };
+  }, [disputeId, participantName, queryClient]);
 
   return {
     messages,
     dispute,
-    loading,
-    error,
+    loading: messagesLoading || disputeLoading,
     sendMessage
   };
 };
